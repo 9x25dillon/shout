@@ -1,0 +1,11 @@
+name = "LIMPSBridge"
+uuid = "7bfdf6e1-5f16-4b9a-9a7f-2f3b9afccce1"
+authors = ["You <you@example.com>"]
+version = "0.2.0"
+
+[deps]
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
