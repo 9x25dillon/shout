@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+import os
+import tempfile
+import aiofiles
+import json
+import numpy as np
+import httpx
+import uuid
+from typing import List, Dict, Any
+
+app = FastAPI()
+app.mount(
+    "/ui",
+    StaticFiles(directory=os.path.join(os.path.dirname(__file__), "..", "static")),
+    name="ui",
+)
+
+JULIA_BASE = os.environ.get("JULIA_BASE", "http://localhost:9000")
+
+# Session memory: sid -> { V (d×N), ids (N), d, N, neighbors, weights, m_hat, H_hat }
+QSESS: Dict[str, Dict[str, Any]] = {}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root() -> str:
+    return '<meta http-equiv="refresh" content="0;url=/ui/qvnm.html" />'
+
+
+# ---------- helpers ----------
+def _ensure_float32_col_unit(V: np.ndarray) -> np.ndarray:
+    # V can be d×N or N×d; we expect d×N
+    if V.ndim != 2:
+        raise ValueError("Vectors must be a 2D array")
+    d0, d1 = V.shape
+    # if looks like N×d (more rows than cols), assume transpose
+    if d0 > d1:
+        V = V.T
+    V = V.astype(np.float32, copy=False)
+    norms = np.linalg.norm(V, axis=0, keepdims=True) + 1e-12
+    V = V / norms
+    return V
+
+
+def _knn_graph_from_V(V: np.ndarray, k: int = 10) -> tuple[list[list[int]], list[list[float]]]:
+    # V is d×N unit-norm
+    d, N = V.shape
+    # cosine sim
+    S = (V.T @ V).astype(np.float64)
+    # ensure numerical cleanliness
+    np.clip(S, -1.0, 1.0, out=S)
+    neighbors: list[list[int]] = []
+    weights: list[list[float]] = []
+    # distance on sphere: chordal distance sqrt(2-2cos)
+    for i in range(N):
+        sims = S[i]
+        # exclude self by setting to -inf
+        sims_i = sims.copy()
+        sims_i[i] = -np.inf
+        # top-k by similarity
+        nn_idx = np.argpartition(-sims_i, kth=min(k, N - 1) - 1)[: min(k, N - 1)]
+        # sort by similarity desc
+        nn_idx = nn_idx[np.argsort(-sims_i[nn_idx])]
+        # convert to 1-based for Julia
+        nbs = (nn_idx + 1).tolist()
+        # weights are distances (cost)
+        dist = np.sqrt(np.maximum(0.0, 2.0 - 2.0 * sims_i[nn_idx])).tolist()
+        neighbors.append(nbs)
+        weights.append(dist)
+    return neighbors, weights
+
+
+async def _post_json(url: str, payload: dict) -> dict:
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+
+# ---------- upload vectors (.jsonl or .npz) ----------
+@app.post("/qvnm/upload_vectors")
+async def qvnm_upload_vectors(file: UploadFile = File(...)) -> JSONResponse:
+    fd, tmp = tempfile.mkstemp(suffix=os.path.splitext(file.filename or "")[1])
+    os.close(fd)
+    try:
+        async with aiofiles.open(tmp, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                await f.write(chunk)
+        ids: list[str] = []
+        V: np.ndarray | None = None
+        if tmp.endswith(".jsonl"):
+            vecs: list[np.ndarray] = []
+            async with aiofiles.open(tmp, "r", encoding="utf-8") as f:
+                async for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    ids.append(str(rec.get("id", f"id{len(ids)}")))
+                    vecs.append(np.asarray(rec["vector"], dtype=np.float32))
+            M = np.stack(vecs, axis=0)
+            M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-12)
+            V = M.T.astype(np.float32, copy=False)  # d×N
+        elif tmp.endswith(".npz"):
+            dat = np.load(tmp, allow_pickle=False)
+            if "V" in dat:
+                V = _ensure_float32_col_unit(np.array(dat["V"]))
+                d, N = V.shape
+                if "ids" in dat:
+                    ids = list(map(str, dat["ids"]))
+                else:
+                    ids = [f"id{i}" for i in range(N)]
+            elif "vectors" in dat:
+                M = np.array(dat["vectors"]).astype(np.float32, copy=False)  # N×d
+                M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-12)
+                V = M.T
+                if "ids" in dat:
+                    ids = list(map(str, dat["ids"]))
+                else:
+                    ids = [f"id{i}" for i in range(M.shape[0])]
+            elif "X" in dat:
+                M = np.array(dat["X"]).astype(np.float32, copy=False)
+                M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-12)
+                V = M.T
+                if "ids" in dat:
+                    ids = list(map(str, dat["ids"]))
+                else:
+                    ids = [f"id{i}" for i in range(M.shape[0])]
+            else:
+                raise ValueError(".npz must contain 'V' (d×N) or 'vectors'/'X' (N×d)")
+        else:
+            raise ValueError("Unsupported file type. Use .jsonl or .npz")
+
+        assert V is not None
+        d, N = int(V.shape[0]), int(V.shape[1])
+        # truncate/extend ids
+        if len(ids) < N:
+            ids += [f"id{i}" for i in range(len(ids), N)]
+        elif len(ids) > N:
+            ids = ids[:N]
+        sid = uuid.uuid4().hex
+        QSESS[sid] = {
+            "V": V,
+            "ids": ids,
+            "d": d,
+            "N": N,
+            "neighbors": None,
+            "weights": None,
+            "m_hat": None,
+            "H_hat": None,
+        }
+        return JSONResponse({"sid": sid, "d": d, "N": N, "ids_head": ids[:5]})
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+
+
+# ---------- proxies ----------
+@app.post("/qvnm/estimate_id")
+async def proxy_estimate_id(payload: Dict[str, Any]) -> JSONResponse:
+    sid = payload.get("sid")
+    if not sid or sid not in QSESS:
+        return JSONResponse({"error": "missing or invalid sid"}, status_code=400)
+    sess = QSESS[sid]
+    V = sess["V"]
+    d, N = int(V.shape[0]), int(V.shape[1])
+    req = {
+        "d": d,
+        "N": N,
+        "V": V.astype(np.float32, copy=False).ravel(order="F").tolist(),
+        "k": int(payload.get("k", 10)),
+        "gamma": float(payload.get("gamma", 0.5)),
+        "alpha": float(payload.get("alpha", 0.5)),
+        "boots": int(payload.get("boots", 8)),
+        "mode": payload.get("mode", "local"),
+    }
+    if req["mode"] == "local":
+        req["r"] = int(payload.get("r", 64))
+    out = await _post_json(f"{JULIA_BASE}/qvnm/estimate_id", req)
+
+    mode = out.get("mode", "local")
+    if mode == "global":
+        # expand scalars to vectors
+        m_hat = float(out.get("m_hat", 0.0))
+        H_hat = float(out.get("H_hat", 0.0))
+        sess["m_hat"] = [m_hat] * N
+        sess["H_hat"] = [H_hat] * N
+    else:
+        # ensure numeric lists and fill NaNs with means
+        m_hat = np.array(out.get("m_hat", [0.0] * N), dtype=np.float64)
+        H_hat = np.array(out.get("H_hat", [0.0] * N), dtype=np.float64)
+        # replace non-finite
+        for arr in (m_hat, H_hat):
+            mask = ~np.isfinite(arr)
+            if mask.any():
+                arr[mask] = float(np.nanmean(arr[~mask])) if (~mask).any() else 0.0
+        sess["m_hat"] = m_hat.astype(float).tolist()
+        sess["H_hat"] = H_hat.astype(float).tolist()
+    return JSONResponse({"sid": sid, **out})
+
+
+@app.post("/qvnm/build_preview")
+async def proxy_build_preview(payload: Dict[str, Any]) -> JSONResponse:
+    sid = payload.get("sid")
+    if not sid or sid not in QSESS:
+        return JSONResponse({"error": "missing or invalid sid"}, status_code=400)
+    sess = QSESS[sid]
+    V = sess["V"]
+    d, N = int(V.shape[0]), int(V.shape[1])
+    # ensure estimates
+    if not sess.get("m_hat") or not sess.get("H_hat"):
+        return JSONResponse({"error": "run estimate_id first"}, status_code=400)
+    # ensure knn graph
+    k_graph = int(payload.get("knn_k", 10))
+    if sess.get("neighbors") is None or sess.get("weights") is None or sess.get("_k_graph") != k_graph:
+        nei, wts = _knn_graph_from_V(V, k=k_graph)
+        sess["neighbors"], sess["weights"], sess["_k_graph"] = nei, wts, k_graph
+    req = {
+        "mode": "build",
+        "d": d,
+        "N": N,
+        "V": V.astype(np.float32, copy=False).ravel(order="F").tolist(),
+        "neighbors": sess["neighbors"],
+        "weights": sess["weights"],
+        "m_hat": sess["m_hat"],
+        "H_hat": sess["H_hat"],
+        "lambda_m": float(payload.get("lambda_m", 0.3)),
+        "lambda_h": float(payload.get("lambda_h", 0.3)),
+        "r": int(payload.get("r", 2)),
+        "k_eval": int(payload.get("k_eval", 10)),
+        "bins": int(payload.get("bins", 20)),
+    }
+    out = await _post_json(f"{JULIA_BASE}/qvnm/preview", req)
+    return JSONResponse({"sid": sid, **out})
+
+
+@app.post("/qvnm/query")
+async def proxy_query(payload: Dict[str, Any]) -> JSONResponse:
+    sid = payload.get("sid")
+    if not sid or sid not in QSESS:
+        return JSONResponse({"error": "missing or invalid sid"}, status_code=400)
+    sess = QSESS[sid]
+    V = sess["V"]
+    d, N = int(V.shape[0]), int(V.shape[1])
+    if sess.get("neighbors") is None or sess.get("weights") is None:
+        nei, wts = _knn_graph_from_V(V, k=int(payload.get("knn_k", 10)))
+        sess["neighbors"], sess["weights"] = nei, wts
+    if not sess.get("m_hat") or not sess.get("H_hat"):
+        # default to zeros if not estimated, to allow demo
+        sess["m_hat"] = [0.0] * N
+        sess["H_hat"] = [0.0] * N
+    req = {
+        "mode": "build",
+        "d": d,
+        "N": N,
+        "V": V.astype(np.float32, copy=False).ravel(order="F").tolist(),
+        "neighbors": sess["neighbors"],
+        "weights": sess["weights"],
+        "m_hat": sess["m_hat"],
+        "H_hat": sess["H_hat"],
+        "ids": sess["ids"],
+        "seed_id": payload.get("seed_id"),
+        "topk": int(payload.get("topk", 5)),
+        "steps": int(payload.get("steps", 10)),
+        "alpha": float(payload.get("alpha", 0.85)),
+        "theta": float(payload.get("theta", 0.0)),
+    }
+    if "prior" in payload and payload["prior"] is not None:
+        req["prior"] = payload["prior"]
+    out = await _post_json(f"{JULIA_BASE}/qvnm/query", req)
+    return JSONResponse({"sid": sid, **out})
+
+
+@app.post("/qvnm/build_codes")
+async def proxy_build_codes(payload: Dict[str, Any]) -> JSONResponse:
+    sid = payload.get("sid")
+    if not sid or sid not in QSESS:
+        return JSONResponse({"error": "missing or invalid sid"}, status_code=400)
+    sess = QSESS[sid]
+    V = sess["V"]
+    d, N = int(V.shape[0]), int(V.shape[1])
+    if sess.get("neighbors") is None or sess.get("weights") is None:
+        nei, wts = _knn_graph_from_V(V, k=int(payload.get("knn_k", 10)))
+        sess["neighbors"], sess["weights"] = nei, wts
+    if not sess.get("m_hat") or not sess.get("H_hat"):
+        sess["m_hat"] = [0.0] * N
+        sess["H_hat"] = [0.0] * N
+    req = {
+        "d": d,
+        "N": N,
+        "V": V.astype(np.float32, copy=False).ravel(order="F").tolist(),
+        "neighbors": sess["neighbors"],
+        "weights": sess["weights"],
+        "m_hat": sess["m_hat"],
+        "H_hat": sess["H_hat"],
+        "lambda_code": float(payload.get("lambda_code", 0.25)),
+        "hard": bool(payload.get("hard", False)),
+    }
+    out = await _post_json(f"{JULIA_BASE}/qvnm/build_codes", req)
+    return JSONResponse({"sid": sid, **out})
+
+
+@app.post("/cpl/init")
+async def proxy_cpl_init(payload: Dict[str, Any]) -> JSONResponse:
+    req = {
+        "f": int(payload.get("f", 256)),
+        "c": int(payload.get("c", 4096)),
+        "tau": float(payload.get("tau", 0.07)),
+        "seed": int(payload.get("seed", 2214)),
+    }
+    out = await _post_json(f"{JULIA_BASE}/cpl/init", req)
+    return JSONResponse(out)
+
+
+@app.get("/qvnm/session/{sid}")
+async def get_session_meta(sid: str) -> JSONResponse:
+    if sid not in QSESS:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    sess = QSESS[sid]
+    return JSONResponse({
+        "sid": sid,
+        "d": sess["d"],
+        "N": sess["N"],
+        "ids_head": sess["ids"][:5],
+        "has_graph": sess.get("neighbors") is not None,
+        "has_estimates": sess.get("m_hat") is not None,
+    })
+
+
+if __name__ == "__main__":
+    uvicorn.run("api:app", host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), reload=False)
