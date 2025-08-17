@@ -83,6 +83,19 @@ async def _post_json(url: str, payload: dict) -> dict:
         return r.json()
 
 
+# ---------- text helpers ----------
+def _texts_for_ids(sess: Dict[str, Any], id_list: list[str]) -> list[dict[str, str]]:
+    ids: list[str] = sess.get("ids", []) or []
+    texts: list[str] = sess.get("texts", []) or []
+    pos: dict[str, int] = {ids[i]: i for i in range(len(ids))}
+    out: list[dict[str, str]] = []
+    for _id in id_list:
+        i = pos.get(_id)
+        if i is not None and i < len(texts):
+            out.append({"id": _id, "text": texts[i]})
+    return out
+
+
 # ---------- upload vectors (.jsonl or .npz) ----------
 @app.post("/qvnm/upload_vectors")
 async def qvnm_upload_vectors(file: UploadFile = File(...)) -> JSONResponse:
@@ -250,6 +263,110 @@ async def proxy_build_preview(payload: Dict[str, Any]) -> JSONResponse:
     sess["preview"] = out
     return JSONResponse({"sid": sid, **out})
 
+
+# ---------- Qwen optimize: retrieve context and propose diffs ----------
+async def run_qwen(prompt: str, model_id: str | None = None, max_new_tokens: int = 800) -> str:
+    """
+    - If MODEL_ENDPOINT is set, POST there as a simple JSON API {prompt, max_new_tokens}
+    - Else try local transformers using QWEN_MODEL or model_id.
+    """
+    endpoint = os.environ.get("MODEL_ENDPOINT")
+    if endpoint:
+        async with httpx.AsyncClient(timeout=300.0) as cx:
+            r = await cx.post(endpoint, json={"prompt": prompt, "max_new_tokens": max_new_tokens})
+            r.raise_for_status()
+            try:
+                j = r.json()
+                return j.get("text") or j.get("output") or r.text
+            except Exception:
+                return r.text
+
+    # Local transformers fallback
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch
+    mid = model_id or os.environ.get("QWEN_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
+    tok = AutoTokenizer.from_pretrained(mid, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        mid,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+    msgs = [
+        {"role": "system", "content": "You are a senior engineer. Be concise; return unified diffs when changing code."},
+        {"role": "user", "content": prompt},
+    ]
+    inputs = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(model.device)
+    out = model.generate(inputs, max_new_tokens=max_new_tokens, do_sample=False)
+    return tok.decode(out[0], skip_special_tokens=True)
+
+
+def build_prompt(goal: str, seed_id: str, ctx_blobs: list[dict]) -> str:
+    header = (
+        "You are given code/docs context. Task: propose concrete performance, safety, or readability optimizations relevant to the goal. Return:\n"
+        "1) a brief rationale; 2) prioritized checklist; 3) unified diffs for files you modify; 4) tests if applicable.\n\n"
+        f"GOAL:\n{goal}\n\n"
+        f"SEED: {seed_id}\n\n"
+        "CONTEXT (IDs + excerpts):\n"
+    )
+    parts: list[str] = []
+    for blob in ctx_blobs:
+        txt = str(blob.get("text", ""))[:3000]
+        parts.append(f"--- {blob.get('id','')} ---\n{txt}\n")
+    return header + "\n".join(parts)
+
+
+@app.post("/pilot/optimize")
+async def pilot_optimize(
+    session: str,
+    seed_id: str,
+    goal: str = Body(..., embed=True),
+    topk: int = 8,
+    steps: int = 10,
+    alpha: float = 0.85,
+    theta: float = 0.0,
+    model_id: str | None = None,
+):
+    sess = QSESS.get(session)
+    if not sess:
+        return JSONResponse({"error": "bad session"}, status_code=400)
+    V = sess["V"]
+    d, N = int(V.shape[0]), int(V.shape[1])
+    # ensure graph and estimates
+    if sess.get("neighbors") is None or sess.get("weights") is None:
+        nei, wts = _knn_graph_from_V(V, k=10)
+        sess["neighbors"], sess["weights"] = nei, wts
+    if not sess.get("m_hat") or not sess.get("H_hat"):
+        sess["m_hat"], sess["H_hat"] = [0.0] * N, [0.0] * N
+
+    req = {
+        "mode": "build",
+        "d": d,
+        "N": N,
+        "V": V.astype(np.float32, copy=False).ravel(order="F").tolist(),
+        "neighbors": sess["neighbors"],
+        "weights": sess["weights"],
+        "m_hat": sess["m_hat"],
+        "H_hat": sess["H_hat"],
+        "ids": sess.get("ids"),
+        "seed_id": seed_id,
+        "topk": int(topk),
+        "steps": int(steps),
+        "alpha": float(alpha),
+        "theta": float(theta),
+    }
+    ans = await _post_json(f"{JULIA_BASE}/qvnm/query", req)
+
+    top_ids = [x.get("id") for x in (ans.get("top") or []) if x.get("id")]
+    ctx = _texts_for_ids(sess, top_ids)
+    prompt = build_prompt(goal, seed_id, ctx)
+    llm_out = await run_qwen(prompt, model_id=model_id, max_new_tokens=1200)
+    return JSONResponse({
+        "seed": seed_id,
+        "goal": goal,
+        "top": ans.get("top"),
+        "qwen": llm_out,
+    })
 
 @app.post("/qvnm/query")
 async def proxy_query(payload: Dict[str, Any]) -> JSONResponse:
