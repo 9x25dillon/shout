@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import os
 import tempfile
 import aiofiles
 import json
+import csv
+import io
+import time
 import numpy as np
 import httpx
 import uuid
@@ -239,6 +242,8 @@ async def proxy_build_preview(payload: Dict[str, Any]) -> JSONResponse:
         "bins": int(payload.get("bins", 20)),
     }
     out = await _post_json(f"{JULIA_BASE}/qvnm/preview", req)
+    # cache preview for exports
+    sess["preview"] = out
     return JSONResponse({"sid": sid, **out})
 
 
@@ -279,6 +284,41 @@ async def proxy_query(payload: Dict[str, Any]) -> JSONResponse:
     return JSONResponse({"sid": sid, **out})
 
 
+@app.post("/qvnm/query_traj")
+async def proxy_query_traj(payload: Dict[str, Any]) -> JSONResponse:
+    sid = payload.get("sid")
+    if not sid or sid not in QSESS:
+        return JSONResponse({"error": "missing or invalid sid"}, status_code=400)
+    sess = QSESS[sid]
+    V = sess["V"]
+    d, N = int(V.shape[0]), int(V.shape[1])
+    if sess.get("neighbors") is None or sess.get("weights") is None:
+        nei, wts = _knn_graph_from_V(V, k=int(payload.get("knn_k", 10)))
+        sess["neighbors"], sess["weights"] = nei, wts
+    if not sess.get("m_hat") or not sess.get("H_hat"):
+        sess["m_hat"] = [0.0] * N
+        sess["H_hat"] = [0.0] * N
+    req = {
+        "mode": "build",
+        "d": d,
+        "N": N,
+        "V": V.astype(np.float32, copy=False).ravel(order="F").tolist(),
+        "neighbors": sess["neighbors"],
+        "weights": sess["weights"],
+        "m_hat": sess["m_hat"],
+        "H_hat": sess["H_hat"],
+        "ids": sess["ids"],
+        "seed_id": payload.get("seed_id"),
+        "steps": int(payload.get("steps", 20)),
+        "alpha": float(payload.get("alpha", 0.85)),
+        "theta": float(payload.get("theta", 0.0)),
+    }
+    if "prior" in payload and payload["prior"] is not None:
+        req["prior"] = payload["prior"]
+    out = await _post_json(f"{JULIA_BASE}/qvnm/query_traj", req)
+    return JSONResponse({"sid": sid, **out})
+
+
 @app.post("/qvnm/build_codes")
 async def proxy_build_codes(payload: Dict[str, Any]) -> JSONResponse:
     sid = payload.get("sid")
@@ -305,7 +345,105 @@ async def proxy_build_codes(payload: Dict[str, Any]) -> JSONResponse:
         "hard": bool(payload.get("hard", False)),
     }
     out = await _post_json(f"{JULIA_BASE}/qvnm/build_codes", req)
+    # cache codes summary for exports
+    sess["codes"] = out.get("codes")
     return JSONResponse({"sid": sid, **out})
+
+
+# --- helpers to rebuild W and get coords from last preview ---
+def _last_coords(sess: Dict[str, Any]) -> tuple[list[float], int]:
+    prev = sess.get("preview") or {}
+    em = prev.get("eigenmaps") or {}
+    coords = em.get("coords") or []
+    r = int(em.get("r", 0))
+    return coords, r
+
+
+async def _rebuild_W(sess: Dict[str, Any], k: int = 10, lambda_m: float = 0.3, lambda_h: float = 0.3) -> list[list[float]]:
+    V = sess["V"]
+    d, N = int(V.shape[0]), int(V.shape[1])
+    nei, wts = _knn_graph_from_V(V, k=k)
+    req = {
+        "d": d,
+        "N": N,
+        "V": V.astype(np.float32, copy=False).ravel(order="F").tolist(),
+        "neighbors": nei,
+        "weights": wts,
+        "m_hat": sess.get("m_hat") or [0.0] * N,
+        "H_hat": sess.get("H_hat") or [0.0] * N,
+        "lambda_m": float(lambda_m),
+        "lambda_h": float(lambda_h),
+    }
+    out = await _post_json(f"{JULIA_BASE}/qvnm/build", req)
+    return out["W"]
+
+
+# --- export as CSV/JSON files served by FastAPI ---
+@app.get("/qvnm/export")
+async def qvnm_export(session: str, kind: str = "coords_csv", k: int = 10, lambda_m: float = 0.3, lambda_h: float = 0.3, threshold: float = 0.0):
+    """
+    kind ∈ {coords_csv, codes_csv, W_json, edges_csv}
+    - coords_csv: N rows: node_id, x, y  (if r>=2; else returns 1D y=0)
+    - codes_csv:  counts per code index (if available from last code-blend)
+    - W_json:     dense adjacency as JSON (float32)
+    - edges_csv:  i,j,weight (only weights >= threshold)
+    """
+    sid = session
+    if sid not in QSESS:
+        return JSONResponse({"error": "bad session"}, status_code=400)
+    sess = QSESS[sid]
+    ids = sess.get("ids") or [str(i) for i in range(sess["V"].shape[1])]
+
+    if kind == "coords_csv":
+        coords, r = _last_coords(sess)
+        N = len(ids)
+        xs = [0.0] * N
+        ys = [0.0] * N
+        if r >= 1 and coords and len(coords) >= r * N:
+            # coords is vec(coords') in Julia ⇒ order: for i in 0..N-1, for d in 0..r-1: coords[i*r + d]
+            for i in range(N):
+                xs[i] = float(coords[i * r + 0])
+                ys[i] = float(coords[i * r + 1]) if r >= 2 else 0.0
+        # build CSV
+        sio = io.StringIO()
+        w = csv.writer(sio)
+        w.writerow(["node_id", "x", "y"])
+        for nid, x, y in zip(ids, xs, ys):
+            w.writerow([nid, f"{x:.6g}", f"{y:.6g}"])
+        return PlainTextResponse(content=sio.getvalue(), media_type="text/csv")
+
+    if kind == "codes_csv":
+        codes = sess.get("codes") or {}
+        hist = codes.get("hist") if isinstance(codes, dict) else None
+        if hist is None:
+            return JSONResponse({"error": "no codes available; run build_codes first"}, status_code=400)
+        sio = io.StringIO()
+        w = csv.writer(sio)
+        w.writerow(["code", "count"])
+        for idx, cnt in enumerate(hist, start=1):
+            w.writerow([idx, int(cnt)])
+        return PlainTextResponse(content=sio.getvalue(), media_type="text/csv")
+
+    if kind == "W_json":
+        W = await _rebuild_W(sess, k=int(k), lambda_m=float(lambda_m), lambda_h=float(lambda_h))
+        return JSONResponse({"W": W})
+
+    if kind == "edges_csv":
+        W = await _rebuild_W(sess, k=int(k), lambda_m=float(lambda_m), lambda_h=float(lambda_h))
+        thr = float(threshold)
+        N = len(W)
+        sio = io.StringIO()
+        w = csv.writer(sio)
+        w.writerow(["i", "j", "weight"])  # 1-based indices as in Julia
+        for i in range(N):
+            row = W[i]
+            for j in range(i + 1, N):  # undirected edges once
+                wij = float(row[j])
+                if wij >= thr:
+                    w.writerow([i + 1, j + 1, f"{wij:.6g}"])
+        return PlainTextResponse(content=sio.getvalue(), media_type="text/csv")
+
+    return JSONResponse({"error": "unknown kind"}, status_code=400)
 
 
 @app.post("/cpl/init")

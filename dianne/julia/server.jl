@@ -451,6 +451,51 @@ function handle_query(req::HTTP.Request)
 end
 HTTP.register!(router, "POST", "/qvnm/query", handle_query)
 
+# (4b) Query trajectory: return ψ for each step (length = steps+1)
+function handle_query_traj(req::HTTP.Request)
+    o = JSON3.read(String(req.body))
+    mode   = String(get(o, "mode", "build"))
+    steps  = Int(get(o, "steps", 10))
+    alpha  = Float64(get(o, "alpha", 0.85))
+    theta  = Float64(get(o, "theta", 0.0))
+    ids    = get(o, "ids", nothing)
+
+    # Build/accept W
+    W = if mode == "build"
+        Array{Float64}(qvnm_build(o)["W"])
+    else
+        N = Int(o["N"])
+        Wvec = Vector{Float64}(o["W"])
+        reshape(permutedims(reshape(Wvec, (N, N))), (N, N))
+    end
+    N = size(W, 1)
+    Pmat = row_stochastic(W)
+
+    # Seed ψ0
+    ψ0 = fill(1.0 / N, N)
+    if haskey(o, "seed_id") && ids !== nothing && o["seed_id"] !== nothing
+        idlist = [String(x) for x in ids]; seed = String(o["seed_id"])
+        pos = findfirst(==(seed), idlist)
+        if pos !== nothing
+            ψ0 .= 0.0; ψ0[pos] = 1.0
+        end
+    end
+    prior = haskey(o, "prior") ? [Float64(x) for x in o["prior"]] : nothing
+
+    # Roll out trajectory
+    traj = Vector{Vector{Float64}}(undef, steps + 1)
+    ψ = copy(ψ0); traj[1] = copy(ψ)
+    for t in 1:steps
+        ψ = diffusion_walk(Pmat, ψ; alpha = alpha, steps = 1, theta = theta, prior = prior)
+        traj[t + 1] = copy(ψ)
+    end
+
+    return HTTP.Response(200, JSON3.write(Dict(
+        "N" => N, "steps" => steps, "alpha" => alpha, "theta" => theta, "traj" => traj
+    )))
+end
+HTTP.register!(router, "POST", "/qvnm/query_traj", handle_query_traj)
+
 # (5) Build+codes
 function handle_build_codes(req::HTTP.Request)
     o = JSON3.read(String(req.body))
