@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -99,6 +99,7 @@ async def qvnm_upload_vectors(file: UploadFile = File(...)) -> JSONResponse:
         V: np.ndarray | None = None
         if tmp.endswith(".jsonl"):
             vecs: list[np.ndarray] = []
+            texts: list[str] = []
             async with aiofiles.open(tmp, "r", encoding="utf-8") as f:
                 async for line in f:
                     line = line.strip()
@@ -107,9 +108,11 @@ async def qvnm_upload_vectors(file: UploadFile = File(...)) -> JSONResponse:
                     rec = json.loads(line)
                     ids.append(str(rec.get("id", f"id{len(ids)}")))
                     vecs.append(np.asarray(rec["vector"], dtype=np.float32))
+                    texts.append(str(rec.get("text", "")))
             M = np.stack(vecs, axis=0)
             M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-12)
             V = M.T.astype(np.float32, copy=False)  # d×N
+            TEXTS = texts
         elif tmp.endswith(".npz"):
             dat = np.load(tmp, allow_pickle=False)
             if "V" in dat:
@@ -151,6 +154,7 @@ async def qvnm_upload_vectors(file: UploadFile = File(...)) -> JSONResponse:
         QSESS[sid] = {
             "V": V,
             "ids": ids,
+            "texts": locals().get("TEXTS", []),
             "d": d,
             "N": N,
             "neighbors": None,
