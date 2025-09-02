@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>QVNM — Quantum Vectorization Node Matrix</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; margin:0; background:#0b0f14; color:#e7edf5}
+  header{padding:16px 20px; background:#0f1620; border-bottom:1px solid #1c2633;}
+  .wrap{display:grid; grid-template-columns:340px 1fr; gap:16px; padding:16px;}
+  .card{background:#0f1620; border:1px solid #1c2633; border-radius:12px; padding:12px;}
+  .row{display:flex; gap:8px; align-items:center; margin:8px 0}
+  input,select,button{background:#09101a; color:#cfe3ff; border:1px solid #1c2633; border-radius:8px; padding:8px}
+  button{cursor:pointer}
+  canvas{background:#070c12; border:1px solid #1c2633; border-radius:8px}
+  .log{font-family:ui-monospace, SFMono-Regular,Menlo,Consolas; white-space:pre-wrap; line-height:1.25; height:140px; overflow:auto; background:#070c12; padding:10px; border-radius:8px; border:1px solid #1c2633}
+  .pill{display:inline-block; padding:2px 8px; border-radius:999px; background:#0b1a29; border:1px solid #15324d; font-size:12px}
+  a{color:#8bc0ff}
+</style>
+</head>
+<body>
+<header>
+  <h1 style="margin:0;font-size:18px">QVNM — Quantum Vectorization Node Matrix</h1>
+</header>
+<div class="wrap">
+  <div class="card">
+    <div class="row"><span class="pill">Upload Vectors</span></div>
+    <input type="file" id="vecfile" accept=".jsonl,.npz"/>
+    <div class="row"><button onclick="upload()">Upload</button><span id="sess" style="opacity:.8"></span></div>
+    <hr/>
+    <div class="row"><span class="pill">Estimate ID/Entropy</span></div>
+    <div class="row">
+      <label>Mode
+        <select id="emode">
+          <option value="local">local</option>
+          <option value="global">global</option>
+        </select>
+      </label>
+      <label>k <input id="ek" type="number" value="10" style="width:70px"/></label>
+    </div>
+    <div class="row">
+      <label>γ <input id="egamma" type="number" step="0.1" value="0.5" style="width:80px"/></label>
+      <label>α <input id="ealpha" type="number" step="0.1" value="0.5" style="width:80px"/></label>
+      <label>boots <input id="eboots" type="number" value="8" style="width:80px"/></label>
+      <label>r <input id="er" type="number" value="64" style="width:80px"/></label>
+    </div>
+    <div class="row"><button onclick="estimate()">Estimate</button></div>
+    <hr/>
+    <div class="row"><span class="pill">Build & Preview W</span></div>
+    <div class="row">
+      <label>kNN k <input id="bk" type="number" value="10" style="width:80px"/></label>
+      <label>λ_m <input id="lm" type="number" step="0.05" value="0.3" style="width:80px"/></label>
+      <label>λ_h <input id="lh" type="number" step="0.05" value="0.3" style="width:80px"/></label>
+    </div>
+    <div class="row">
+      <label>eig dims r <input id="rmap" type="number" value="2" style="width:80px"/></label>
+      <label>evals <input id="ke" type="number" value="10" style="width:80px"/></label>
+      <label>bins <input id="bins" type="number" value="20" style="width:80px"/></label>
+    </div>
+    <div class="row"><button onclick="build()">Build & Preview</button></div>
+    <hr/>
+    <div class="row"><span class="pill">Log</span></div>
+    <div id="log" class="log"></div>
+  </div>
+
+  <div class="card">
+    <div class="row"><span class="pill">Eigenvalues</span></div>
+    <canvas id="evals" width="780" height="160"></canvas>
+    <div class="row"><span class="pill">Eigenmap (r=2)</span></div>
+    <canvas id="scatter" width="780" height="420"></canvas>
+    <div class="row"><span class="pill">Histograms</span></div>
+    <canvas id="hist" width="780" height="180"></canvas>
+    <div class="row" id="stats" style="opacity:.85"></div>
+  </div>
+</div>
+
+<script>
+let SESSION = null;
+const logEl = document.getElementById('log');
+function log(x){ logEl.textContent += x + "\n"; logEl.scrollTop = logEl.scrollHeight; }
+
+async function upload(){
+  const f = document.getElementById('vecfile').files[0];
+  if(!f){ log("No file."); return; }
+  const fd = new FormData(); fd.append('file', f);
+  const r = await fetch('/qvnm/upload_vectors', {method:'POST', body:fd});
+  const j = await r.json(); if(!r.ok){ log('Upload failed: '+JSON.stringify(j)); return; }
+  SESSION = j.session; document.getElementById('sess').textContent = 'session '+SESSION+'  (N='+j.N+', d='+j.d+')';
+  log('Uploaded. N='+j.N+' d='+j.d+' session='+SESSION);
+}
+
+async function estimate(){
+  if(!SESSION){ log('Upload first.'); return; }
+  const body = {
+    mode: document.getElementById('emode').value,
+    k: parseInt(document.getElementById('ek').value,10),
+    gamma: parseFloat(document.getElementById('egamma').value),
+    alpha: parseFloat(document.getElementById('ealpha').value),
+    boots: parseInt(document.getElementById('eboots').value,10),
+    r: parseInt(document.getElementById('er').value,10)
+  };
+  const r = await fetch(`/qvnm/estimate_id?session=${encodeURIComponent(SESSION)}&`+new URLSearchParams(body), {method:'POST'});
+  const j = await r.json();
+  if(!r.ok){ log('Estimate error: '+JSON.stringify(j)); return; }
+  log('Estimated. mode='+j.mode+' m̂[0..3]='+j.m_hat.slice(0,3).map(x=>x.toFixed?.(2)||x).join(', '));
+}
+
+async function build(){
+  if(!SESSION){ log('Upload first.'); return; }
+  const body = {
+    k: parseInt(document.getElementById('bk').value,10),
+    lambda_m: parseFloat(document.getElementById('lm').value),
+    lambda_h: parseFloat(document.getElementById('lh').value),
+    r: parseInt(document.getElementById('rmap').value,10),
+    k_eval: parseInt(document.getElementById('ke').value,10),
+    bins: parseInt(document.getElementById('bins').value,10)
+  };
+  const r = await fetch(`/qvnm/build_preview?session=${encodeURIComponent(SESSION)}&`+new URLSearchParams(body), {method:'POST'});
+  const j = await r.json();
+  if(!r.ok){ log('Build error: '+JSON.stringify(j)); return; }
+  renderPreview(j);
+}
+
+function renderPreview(p){
+  const ev = p.spectrum?.evals || [];
+  drawBars(document.getElementById('evals'), ev, 'Eigenvalues');
+
+  const coords = p.eigenmaps?.coords || [];
+  const rdim = p.eigenmaps?.r || 0;
+  if(rdim>=2 && coords.length>=2){
+    const N = coords.length/rdim;
+    const pts = [];
+    for(let i=0;i<N;i++){ pts.push([coords[i*rdim+0], coords[i*rdim+1]]); }
+    drawScatter(document.getElementById('scatter'), pts);
+  }
+
+  const hm = p.histograms?.m_hat, hH = p.histograms?.H_hat;
+  drawTwoHists(document.getElementById('hist'), hm, hH);
+
+  const deg = p.degree || {};
+  document.getElementById('stats').textContent =
+    `n=${p.n} edges≈${p.edges} | degree μ=${(deg.mean||0).toFixed?.(2)} σ=${(deg.std||0).toFixed?.(2)} | spectral gap=${(p.spectrum?.gap||0).toFixed?.(4)}`;
+  log('Preview ready.');
+}
+
+function drawBars(c, vals, label=''){
+  const ctx = c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height);
+  const m = 20, w = c.width-2*m, h = c.height-2*m;
+  const n = vals.length; const mx = Math.max(1e-9, ...vals);
+  ctx.fillStyle='#9ecbff'; for(let i=0;i<n;i++){
+    const bw = w/n, x = m + i*bw, y = m + h*(1-vals[i]/mx);
+    ctx.fillRect(x, y, Math.max(1,bw-2), m+h - y);
+  }
+  ctx.fillStyle='#cfe3ff'; ctx.fillText(label, m, 12);
+}
+
+function drawScatter(c, pts){
+  const ctx = c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height);
+  const m = 24, w = c.width-2*m, h = c.height-2*m;
+  let xs = pts.map(p=>p[0]), ys = pts.map(p=>p[1]);
+  const minx = Math.min(...xs), maxx = Math.max(...xs), miny = Math.min(...ys), maxy = Math.max(...ys);
+  const sx = (x)=> m + (x-minx)/(maxx-minx+1e-9)*w;
+  const sy = (y)=> m + h - (y-miny)/(maxy-miny+1e-9)*h;
+  ctx.fillStyle='#a8ffd6';
+  for(const [x,y] of pts){ ctx.fillRect(sx(x), sy(y), 3, 3); }
+  ctx.strokeStyle='#26435e'; ctx.strokeRect(m,m,w,h);
+}
+
+function drawTwoHists(c, hm, hH){
+  const ctx = c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height);
+  const m=24, w=c.width-2*m, h=c.height-2*m;
+  function drawOne(hist, y0, color, label){
+    if(!hist || !hist.bins || !hist.edges) return;
+    const bins = hist.bins, edges = hist.edges; const nb=bins.length;
+    const mx = Math.max(1, ...bins);
+    for(let i=0;i<nb;i++){
+      const x = m + i*(w/nb), bh = (bins[i]/mx)*(h/2 - 10);
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y0-bh, (w/nb)-2, bh);
+    }
+    ctx.fillStyle='#cfe3ff'; ctx.fillText(label, m+6, y0- (h/2-12));
+  }
+  drawOne(hm, m+h/2, '#ffbf87', 'm_hat');
+  drawOne(hH, m+h, '#87c5ff', 'H_hat');
+  ctx.strokeStyle='#26435e'; ctx.strokeRect(m,m,w,h);
+}
+</script>
+</body>
+</html>

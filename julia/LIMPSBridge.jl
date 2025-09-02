@@ -5,6 +5,13 @@ using Sockets
 using JSON3
 using LinearAlgebra
 using Statistics
+module LIMPSBridge
+
+using HTTP
+using Sockets
+using JSON3
+using LinearAlgebra
+using Statistics
 using Graphs
 using SimpleWeightedGraphs
 using NearestNeighbors
