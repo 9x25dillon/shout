@@ -5,6 +5,13 @@ using Sockets
 using JSON3
 using LinearAlgebra
 using Statistics
+module LIMPSBridge
+
+using HTTP
+using Sockets
+using JSON3
+using LinearAlgebra
+using Statistics
 using Graphs
 using SimpleWeightedGraphs
 using NearestNeighbors
@@ -130,6 +137,7 @@ function serve(; host::AbstractString = "0.0.0.0", port::Integer = 8099)
     @info "LIMPSBridge listening" host=host port=port
     HTTP.serve(handle, host, port)
 end
+
 
 #############################
 # Costa–Hero Intrinsic ID   #
