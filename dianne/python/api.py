@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi import FastAPI, UploadFile, File, Body
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, FileResponse
+
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import os
@@ -10,6 +13,7 @@ import json
 import csv
 import io
 import time
+
 import numpy as np
 import httpx
 import uuid
@@ -82,7 +86,6 @@ async def _post_json(url: str, payload: dict) -> dict:
         r.raise_for_status()
         return r.json()
 
-
 # ---------- text helpers ----------
 def _texts_for_ids(sess: Dict[str, Any], id_list: list[str]) -> list[dict[str, str]]:
     ids: list[str] = sess.get("ids", []) or []
@@ -121,6 +124,9 @@ async def qvnm_upload_vectors(file: UploadFile = File(...)) -> JSONResponse:
                     rec = json.loads(line)
                     ids.append(str(rec.get("id", f"id{len(ids)}")))
                     vecs.append(np.asarray(rec["vector"], dtype=np.float32))
+            M = np.stack(vecs, axis=0)
+            M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-12)
+            V = M.T.astype(np.float32, copy=False)  # d×N
                     texts.append(str(rec.get("text", "")))
             M = np.stack(vecs, axis=0)
             M = M / (np.linalg.norm(M, axis=1, keepdims=True) + 1e-12)
@@ -167,7 +173,7 @@ async def qvnm_upload_vectors(file: UploadFile = File(...)) -> JSONResponse:
         QSESS[sid] = {
             "V": V,
             "ids": ids,
-            "texts": locals().get("TEXTS", []),
+            "texts": locals().get("TEXTS", [])
             "d": d,
             "N": N,
             "neighbors": None,
@@ -259,6 +265,8 @@ async def proxy_build_preview(payload: Dict[str, Any]) -> JSONResponse:
         "bins": int(payload.get("bins", 20)),
     }
     out = await _post_json(f"{JULIA_BASE}/qvnm/preview", req)
+    return JSONResponse({"sid": sid, **out})
+
     # cache preview for exports
     sess["preview"] = out
     return JSONResponse({"sid": sid, **out})
@@ -404,7 +412,6 @@ async def proxy_query(payload: Dict[str, Any]) -> JSONResponse:
     out = await _post_json(f"{JULIA_BASE}/qvnm/query", req)
     return JSONResponse({"sid": sid, **out})
 
-
 @app.post("/qvnm/query_traj")
 async def proxy_query_traj(payload: Dict[str, Any]) -> JSONResponse:
     sid = payload.get("sid")
@@ -438,8 +445,6 @@ async def proxy_query_traj(payload: Dict[str, Any]) -> JSONResponse:
         req["prior"] = payload["prior"]
     out = await _post_json(f"{JULIA_BASE}/qvnm/query_traj", req)
     return JSONResponse({"sid": sid, **out})
-
-
 @app.post("/qvnm/build_codes")
 async def proxy_build_codes(payload: Dict[str, Any]) -> JSONResponse:
     sid = payload.get("sid")
@@ -466,6 +471,8 @@ async def proxy_build_codes(payload: Dict[str, Any]) -> JSONResponse:
         "hard": bool(payload.get("hard", False)),
     }
     out = await _post_json(f"{JULIA_BASE}/qvnm/build_codes", req)
+    return JSONResponse({"sid": sid, **out})
+
     # cache codes summary for exports
     sess["codes"] = out.get("codes")
     return JSONResponse({"sid": sid, **out})

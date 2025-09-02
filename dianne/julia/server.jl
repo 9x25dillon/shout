@@ -496,6 +496,7 @@ function handle_query_traj(req::HTTP.Request)
 end
 HTTP.register!(router, "POST", "/qvnm/query_traj", handle_query_traj)
 
+main
 # (5) Build+codes
 function handle_build_codes(req::HTTP.Request)
     o = JSON3.read(String(req.body))
