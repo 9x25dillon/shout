@@ -138,7 +138,6 @@ function serve(; host::AbstractString = "0.0.0.0", port::Integer = 8099)
     HTTP.serve(handle, host, port)
 end
 
-
 #############################
 # Costa–Hero Intrinsic ID   #
 #############################
