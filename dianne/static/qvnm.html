@@ -1,0 +1,182 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QVNM UI</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    h2 { margin-top: 24px; }
+    fieldset { border: 1px solid #ddd; padding: 16px; border-radius: 8px; margin-bottom: 16px; }
+    legend { padding: 0 8px; color: #333; }
+    label { display: inline-block; min-width: 120px; }
+    input[type="number"], input[type="text"] { width: 120px; }
+    button { padding: 6px 12px; margin-left: 8px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+    pre { background: #f7f7f8; border: 1px solid #eee; padding: 12px; border-radius: 8px; overflow: auto; }
+    .ok { color: #0a0; }
+    .err { color: #a00; }
+  </style>
+</head>
+<body>
+  <h1>QVNM Playground</h1>
+
+  <fieldset>
+    <legend>1) Upload vectors (.jsonl or .npz)</legend>
+    <div class="row">
+      <input id="file" type="file" accept=".jsonl,.npz" />
+      <button onclick="doUpload()">Upload</button>
+      <span id="uinfo"></span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>2) Estimate ID/Entropy (Costa–Hero)</legend>
+    <div class="row">
+      <label>mode</label>
+      <select id="mode">
+        <option value="local" selected>local</option>
+        <option value="global">global</option>
+      </select>
+      <label>k</label><input id="k" type="number" value="10" />
+      <label>gamma</label><input id="gamma" type="number" value="0.5" step="0.1" />
+      <label>alpha</label><input id="alpha" type="number" value="0.5" step="0.1" />
+      <label>r</label><input id="r" type="number" value="64" />
+      <label>boots</label><input id="boots" type="number" value="8" />
+      <button onclick="doEstimate()">Estimate</button>
+    </div>
+    <div><pre id="estout"></pre></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>3) Build + Preview</legend>
+    <div class="row">
+      <label>kNN k</label><input id="knn_k" type="number" value="10" />
+      <label>lambda_m</label><input id="lambda_m" type="number" value="0.3" step="0.05" />
+      <label>lambda_h</label><input id="lambda_h" type="number" value="0.3" step="0.05" />
+      <label>r</label><input id="rprev" type="number" value="2" />
+      <label>k_eval</label><input id="k_eval" type="number" value="10" />
+      <label>bins</label><input id="bins" type="number" value="20" />
+      <button onclick="doPreview()">Build + Preview</button>
+    </div>
+    <div><pre id="prevout"></pre></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>4) Query (diffusion walk)</legend>
+    <div class="row">
+      <label>seed id</label><input id="seed_id" type="text" placeholder="optional" />
+      <label>topk</label><input id="topk" type="number" value="5" />
+      <label>steps</label><input id="steps" type="number" value="10" />
+      <label>alpha</label><input id="alphaq" type="number" value="0.85" step="0.05" />
+      <label>theta</label><input id="theta" type="number" value="0.0" step="0.05" />
+      <button onclick="doQuery()">Query</button>
+    </div>
+    <div><pre id="qryout"></pre></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Optional: Codes (CPLearn)</legend>
+    <div class="row">
+      <label>lambda_code</label><input id="lambda_code" type="number" value="0.25" step="0.05" />
+      <label>hard</label>
+      <select id="hard"><option value="false">soft</option><option value="true">hard</option></select>
+      <button onclick="doBuildCodes()">Build Codes</button>
+    </div>
+    <div><pre id="codesout"></pre></div>
+  </fieldset>
+
+  <script>
+    let SID = null;
+
+    function setText(id, text, ok=true) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = ok ? 'ok' : 'err';
+    }
+
+    async function doUpload() {
+      const f = document.getElementById('file').files[0];
+      if (!f) { setText('uinfo', 'choose a file', false); return; }
+      const fd = new FormData();
+      fd.append('file', f, f.name);
+      setText('uinfo', 'uploading...');
+      const r = await fetch('/qvnm/upload_vectors', { method: 'POST', body: fd });
+      if (!r.ok) { setText('uinfo', 'upload failed', false); return; }
+      const j = await r.json();
+      SID = j.sid; setText('uinfo', `sid=${SID} d=${j.d} N=${j.N} ids_head=${(j.ids_head||[]).join(', ')}`);
+      document.getElementById('estout').textContent = '';
+      document.getElementById('prevout').textContent = '';
+      document.getElementById('qryout').textContent = '';
+      document.getElementById('codesout').textContent = '';
+    }
+
+    async function doEstimate() {
+      if (!SID) { setText('estout', 'upload first', false); return; }
+      const payload = {
+        sid: SID,
+        mode: document.getElementById('mode').value,
+        k: parseInt(document.getElementById('k').value, 10),
+        gamma: parseFloat(document.getElementById('gamma').value),
+        alpha: parseFloat(document.getElementById('alpha').value),
+        r: parseInt(document.getElementById('r').value, 10),
+        boots: parseInt(document.getElementById('boots').value, 10)
+      };
+      document.getElementById('estout').textContent = 'estimating...';
+      const r = await fetch('/qvnm/estimate_id', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)});
+      const j = await r.json();
+      if (!r.ok) { setText('estout', JSON.stringify(j, null, 2), false); return; }
+      setText('estout', JSON.stringify(j, null, 2));
+    }
+
+    async function doPreview() {
+      if (!SID) { setText('prevout', 'upload first', false); return; }
+      const payload = {
+        sid: SID,
+        knn_k: parseInt(document.getElementById('knn_k').value, 10),
+        lambda_m: parseFloat(document.getElementById('lambda_m').value),
+        lambda_h: parseFloat(document.getElementById('lambda_h').value),
+        r: parseInt(document.getElementById('rprev').value, 10),
+        k_eval: parseInt(document.getElementById('k_eval').value, 10),
+        bins: parseInt(document.getElementById('bins').value, 10),
+      };
+      document.getElementById('prevout').textContent = 'building + previewing...';
+      const r = await fetch('/qvnm/build_preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)});
+      const j = await r.json();
+      if (!r.ok) { setText('prevout', JSON.stringify(j, null, 2), false); return; }
+      setText('prevout', JSON.stringify(j, null, 2));
+    }
+
+    async function doQuery() {
+      if (!SID) { setText('qryout', 'upload first', false); return; }
+      const payload = {
+        sid: SID,
+        seed_id: document.getElementById('seed_id').value || null,
+        topk: parseInt(document.getElementById('topk').value, 10),
+        steps: parseInt(document.getElementById('steps').value, 10),
+        alpha: parseFloat(document.getElementById('alphaq').value),
+        theta: parseFloat(document.getElementById('theta').value),
+      };
+      document.getElementById('qryout').textContent = 'querying...';
+      const r = await fetch('/qvnm/query', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)});
+      const j = await r.json();
+      if (!r.ok) { setText('qryout', JSON.stringify(j, null, 2), false); return; }
+      setText('qryout', JSON.stringify(j, null, 2));
+    }
+
+    async function doBuildCodes() {
+      if (!SID) { setText('codesout', 'upload first', false); return; }
+      const payload = {
+        sid: SID,
+        lambda_code: parseFloat(document.getElementById('lambda_code').value),
+        hard: document.getElementById('hard').value === 'true'
+      };
+      document.getElementById('codesout').textContent = 'building codes...';
+      const r = await fetch('/qvnm/build_codes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)});
+      const j = await r.json();
+      if (!r.ok) { setText('codesout', JSON.stringify(j, null, 2), false); return; }
+      setText('codesout', JSON.stringify(j, null, 2));
+    }
+  </script>
+</body>
+</html>
