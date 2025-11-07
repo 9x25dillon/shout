@@ -1,18 +1,20 @@
-# Integration Guide: SHOUT + kgirl + orwells-egg
+# Integration Guide: SHOUT + kgirl + orwells-egg + NSCTS
 
 ## Executive Summary
 
-This guide documents the integration of three advanced AI/ML ecosystems:
+This guide documents the integration of four advanced AI/ML ecosystems:
 
 1. **SHOUT**: Code analysis (CCL), vector networks (QVNM), stability-aware training (TA-ULS)
 2. **kgirl**: Chaos-adaptive RAG, recursive cognition, holographic memory, FAISS/pgvector
 3. **orwells-egg**: RFV versioning, job queues, SQL generation, ML2 training, workflow orchestration
+4. **NSCTS**: NeuroSymbiotic Coherence Training System - AI-human biometric coherence training
 
 Together, these systems create a **self-organizing cognitive infrastructure** capable of:
 - Adaptive code analysis under uncertainty
 - Recursive hyperparameter optimization
 - Semantic query understanding with vector grounding
 - Autonomous strategy adaptation and emergence
+- Human-AI biometric coherence and symbiotic training
 
 ---
 
@@ -310,6 +312,168 @@ workflow_id = orwells.create_workflow(
 
 # Execute workflow
 results = orwells.execute_workflow(workflow_id, input_data=data)
+```
+
+### 4. NSCTS (NeuroSymbiotic Coherence Training System)
+
+#### Overview
+- **Purpose**: AI-human biometric coherence training with consciousness state analysis
+- **Key Innovation**: Real-time trinity coherence (breath-heart-movement) analysis
+- **Output**: Consciousness states, learning phase progression, coherence metrics
+
+**Key File**: `python/nscts.py`
+
+```python
+from python.nscts import ConsciousnessTrainingSystem, demo_data_source
+
+# Run consciousness training
+system = ConsciousnessTrainingSystem()
+report = await system.train("user_001", demo_data_source, minutes=2.0)
+
+# Analyze results
+print(f"Phase: {report['session']['phase']}")
+print(f"Trinity Coherence: {report['metrics']['trinity']:.3f}")
+print(f"Global Coherence: {report['metrics']['global']:.3f}")
+print(f"Love Field: {report['metrics']['love']:.3f}")
+```
+
+#### Core Components
+
+**BiometricProcessor**:
+- Processes respiratory, cardiac, movement, and neural (EEG) streams
+- Extracts frequency, amplitude, variability, phase, and complexity
+- Uses Higuchi fractal dimension estimation
+- Implements peak detection and spectral analysis
+
+**ConsciousnessState**:
+- Trinity coherence: Breath ↔ Heart ↔ Movement
+- Global coherence: Including neural integration
+- Flow state: Optimal performance indicator
+- Presence: Mindfulness metric
+- Love field: Heart coherence + breath openness
+
+**NeuroSymbioticTrainer**:
+- **Attunement Phase**: Learn baseline biometric patterns
+- **Resonance Phase**: Establish golden-ratio harmonics
+- **Symbiosis Phase**: Stabilize/amplify based on coherence
+- **Transcendence Phase**: Achieve peak states
+
+#### Integration with SHOUT + kgirl + orwells-egg
+
+**Key File**: `python/nscts_integration.py`
+
+##### 1. Consciousness → Vector Embedding
+
+Convert consciousness states to 17-dimensional vectors for QVNM analysis:
+
+```python
+from python.nscts_integration import consciousness_to_embedding
+
+# Convert consciousness state to vector
+embedding = consciousness_to_embedding(consciousness_state)
+
+# Use with QVNM
+response = requests.post("http://localhost:8080/upload",
+    json={"vectors": [embedding], "labels": ["consciousness_t0"]})
+```
+
+##### 2. Coherence → Chaos Metric
+
+Use consciousness variability as chaos metric for ChaosRAG:
+
+```python
+from python.nscts_integration import compute_consciousness_chaos
+
+# Compute chaos from recent states
+chaos_metric = compute_consciousness_chaos(consciousness_history)
+
+# Use for adaptive retrieval
+chaos_mode = kgirl.determine_chaos_mode(chaos_metric)
+results = kgirl.chaos_rag_query(query_vector, chaos_mode, top_k=10)
+```
+
+**Interpretation**:
+- High coherence (low chaos) → Precise, focused retrieval
+- Low coherence (high chaos) → Diverse, exploratory retrieval
+
+##### 3. Session → RFV Versioning
+
+Version consciousness training sessions as computational artifacts:
+
+```python
+from python.nscts_integration import ConsciousnessSessionVersioning
+
+versioning = ConsciousnessSessionVersioning(orwells_bridge)
+
+# Version completed session
+snapshot_id = versioning.version_session(
+    human_id="user_001",
+    session_report=session_report,
+    consciousness_trajectory=states_list,
+)
+
+# Query evolution
+evolution = versioning.get_session_evolution("user_001", max_depth=10)
+```
+
+##### 4. Patterns → Holographic Memory
+
+Store high-coherence states in holographic memory:
+
+```python
+from python.nscts_integration import ConsciousnessPatternMemory
+
+memory = ConsciousnessPatternMemory(kgirl_bridge)
+
+# Store high-coherence states
+for state in consciousness_trajectory:
+    memory.store_high_coherence_state(state, threshold=0.75)
+
+# Recall similar patterns
+similar = memory.recall_similar_states(current_state, top_k=5)
+```
+
+##### 5. Sessions → Job Queue
+
+Distribute training sessions via adaptive queue:
+
+```python
+from python.nscts_integration import DistributedConsciousnessTraining
+
+scheduler = DistributedConsciousnessTraining(orwells_bridge)
+
+# Schedule session
+job_id = scheduler.schedule_session(
+    human_id="user_001",
+    session_config={"duration_minutes": 10},
+    priority=JobPriority.HIGH,
+)
+
+# Complete session
+scheduler.complete_session("user_001", session_report)
+```
+
+#### Unified NSCTS Workflow
+
+Complete integration example:
+
+```python
+from python.nscts_integration import unified_consciousness_workflow
+
+results = await unified_consciousness_workflow(
+    human_id="user_001",
+    data_source=biometric_stream,
+    kgirl=kgirl_bridge,
+    orwells=orwells_bridge,
+    session_minutes=10.0,
+)
+
+# Results include:
+# - Session report with coherence metrics
+# - RFV snapshot ID for version tracking
+# - Consciousness-aware query results
+# - Similar patterns from holographic memory
+# - Session evolution history
 ```
 
 ---
