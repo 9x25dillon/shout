@@ -41,6 +41,10 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import json
+import re
+
+
+_SAFE_TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
 
 
 class ChaosMode(Enum):
@@ -509,6 +513,9 @@ class KGirlBridge:
         Returns:
             Storage operation results
         """
+        if not _SAFE_TABLE_NAME.fullmatch(table_name):
+            return {"error": f"Invalid table name: {table_name!r}"}
+
         if not self.pg_conn:
             return {"error": "PostgreSQL connection not initialized"}
 
@@ -558,6 +565,9 @@ class KGirlBridge:
         Returns:
             Search results
         """
+        if not _SAFE_TABLE_NAME.fullmatch(table_name):
+            return {"error": f"Invalid table name: {table_name!r}"}
+
         if not self.pg_conn:
             return {"error": "PostgreSQL connection not initialized"}
 
